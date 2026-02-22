@@ -14,9 +14,9 @@ from astrbot.api.star import Context, Star, register
 
 @register(
     "newapi",
-    "木头",
+    "木有知",
     "NewAPI 运维助手：概览/模型/日志/额度/异常/分析/建议/健康（中文简指令）",
-    "2.0.0",
+    "2.1.0",
 )
 class NewAPIPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -37,10 +37,8 @@ class NewAPIPlugin(Star):
         self.user_use_forward: bool = bool(config.get("user_use_forward", False))
 
         self.llm_enabled: bool = bool(config.get("llm_enabled", False))
-        self.llm_base_url: str = str(config.get("llm_base_url", "")).strip().rstrip("/")
-        self.llm_api_key: str = str(config.get("llm_api_key", "")).strip()
-        self.llm_model: str = str(config.get("llm_model", "")).strip()
-        self.llm_timeout: int = int(config.get("llm_timeout", 20) or 20)
+        self.llm_use_current_provider: bool = bool(config.get("llm_use_current_provider", True))
+        self.llm_provider_id: str = str(config.get("llm_provider_id", "")).strip()
 
         self._setup_data_paths()
 
@@ -284,37 +282,36 @@ class NewAPIPlugin(Star):
                 lines.append(f"- {self._fmt_ts(t)} | {m} | code={code}")
         return "\n".join(lines)
 
-    async def _llm_analyze(self, title: str, content: str) -> str:
+    async def _llm_analyze(self, event: AstrMessageEvent, title: str, content: str) -> str:
         if not self.llm_enabled:
             return "未开启 LLM 分析（请在配置中启用 llm_enabled）"
-        if not (self.llm_base_url and self.llm_api_key and self.llm_model):
-            return "LLM 配置不完整（llm_base_url / llm_api_key / llm_model）"
 
-        url = f"{self.llm_base_url}/chat/completions"
+        # 默认使用当前会话服务商；可切换为手动指定 provider
+        provider_id = ""
+        try:
+            if self.llm_use_current_provider:
+                provider_id = await self.context.get_current_chat_provider_id(umo=event.unified_msg_origin)
+            else:
+                provider_id = self.llm_provider_id
+        except Exception as e:
+            return f"获取服务商失败: {e}"
+
+        if not provider_id:
+            return "LLM 服务商未设置（请检查 llm_use_current_provider 或 llm_provider_id）"
+
         prompt = (
             f"你是 NewAPI 运维分析助手。请基于以下数据输出中文简报，结构固定为：\n"
             f"1) 主要问题（最多3条）\n2) 根因判断\n3) 立即动作（P0/P1）\n4) 优化建议\n\n"
             f"[{title}]\n{content}"
         )
-        payload = {
-            "model": self.llm_model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.2,
-            "max_tokens": 700,
-        }
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.llm_api_key}",
-        }
-        res = await self._http_post_json(url, headers, payload, self.llm_timeout)
-        if not isinstance(res, dict):
-            return f"LLM 返回异常: {res}"
-        if res.get("error"):
-            return f"LLM 请求失败: {res.get('error')}"
         try:
-            return str(res["choices"][0]["message"]["content"]).strip()
-        except Exception:
-            return f"LLM 返回无法解析: {json.dumps(res, ensure_ascii=False)[:400]}"
+            llm_resp = await self.context.llm_generate(
+                chat_provider_id=provider_id,
+                prompt=prompt,
+            )
+            return str(llm_resp.completion_text).strip()
+        except Exception as e:
+            return f"LLM 调用失败: {e}"
 
     async def _send_text(self, event: AstrMessageEvent, text: str, use_forward: bool):
         if use_forward:
@@ -330,6 +327,16 @@ class NewAPIPlugin(Star):
             c = t[:max_len]
             t = t[max_len:]
             yield event.plain_result(c)
+
+    @filter.command("newapi")
+    async def cmd_newapi_help(self, event: AstrMessageEvent):
+        text = (
+            "📘 NewAPI 指令\n"
+            "/概览 [小时]  /模型 [topN]  /日志 [条数]\n"
+            "/额度  /异常  /分析  /建议  /健康"
+        )
+        async for r in self._send_text(event, text, False):
+            yield r
 
     @filter.command("概览", alias={"tokens统计", "newapi概览"})
     async def cmd_overview(self, event: AstrMessageEvent, hours: int = 24):
@@ -413,7 +420,7 @@ class NewAPIPlugin(Star):
             "top_models": models[:5],
             "abnormal_preview": self._detect_abnormal(log_items),
         }
-        text = await self._llm_analyze("调用分析", json.dumps(brief, ensure_ascii=False))
+        text = await self._llm_analyze(event, "调用分析", json.dumps(brief, ensure_ascii=False))
         async for r in self._send_text(event, text, False):
             yield r
 
@@ -422,7 +429,7 @@ class NewAPIPlugin(Star):
         logs = await self._fetch_logs_payload(max(self.default_log_limit, 50), 24)
         log_items = self._extract_log_items(logs)
         raw = self._detect_abnormal(log_items)
-        text = await self._llm_analyze("优化建议", raw)
+        text = await self._llm_analyze(event, "优化建议", raw)
         async for r in self._send_text(event, text, False):
             yield r
 
@@ -442,8 +449,10 @@ class NewAPIPlugin(Star):
             out.append(f"/api/data/self: {'OK' if isinstance(p3, dict) and not p3.get('error') else 'FAIL'}")
 
         if self.llm_enabled:
-            ok = bool(self.llm_base_url and self.llm_api_key and self.llm_model)
-            out.append(f"LLM: {'OK' if ok else '配置不完整'}")
+            if self.llm_use_current_provider:
+                out.append("LLM: 已启用（使用当前会话服务商）")
+            else:
+                out.append(f"LLM: 已启用（手动服务商: {self.llm_provider_id or '未设置'}）")
         else:
             out.append("LLM: 未启用")
 

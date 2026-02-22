@@ -57,24 +57,15 @@
     "type": "bool",
     "default": false
   },
-  "llm_base_url": {
-    "description": "LLM API 基础地址（OpenAI 兼容，例 https://api.xxx/v1）",
-    "type": "text",
-    "default": ""
+  "llm_use_current_provider": {
+    "description": "LLM 默认使用当前会话服务商",
+    "type": "bool",
+    "default": true
   },
-  "llm_api_key": {
-    "description": "LLM API Key",
-    "type": "text",
-    "default": ""
-  },
-  "llm_model": {
-    "description": "LLM 模型名",
-    "type": "text",
-    "default": ""
-  },
-  "llm_timeout": {
-    "description": "LLM 超时（秒）",
-    "type": "int",
-    "default": 20
+  "llm_provider_id": {
+    "description": "手动指定 LLM 服务商（llm_use_current_provider=false 时生效）",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider"
   }
 }
