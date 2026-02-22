@@ -16,7 +16,7 @@ from astrbot.api.star import Context, Star, register
     "newapi",
     "木有知",
     "NewAPI 运维助手：概览/模型/日志/额度/异常/分析/建议/健康（中文简指令）",
-    "2.1.0",
+    "2.1.1",
 )
 class NewAPIPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -109,6 +109,9 @@ class NewAPIPlugin(Star):
         if isinstance(payload, list):
             return payload
         if not isinstance(payload, dict):
+            return []
+        if payload.get("success") is False and payload.get("message"):
+            logger.warning(f"newapi usage api failed: {payload.get('message')}")
             return []
         for key in ("data", "list", "items"):
             v = payload.get(key)
@@ -231,6 +234,9 @@ class NewAPIPlugin(Star):
             return payload
         if not isinstance(payload, dict):
             return []
+        if payload.get("success") is False and payload.get("message"):
+            logger.warning(f"newapi log api failed: {payload.get('message')}")
+            return []
         d = payload.get("data")
         if isinstance(d, dict):
             for k in ("items", "list", "data"):
@@ -333,7 +339,11 @@ class NewAPIPlugin(Star):
         text = (
             "📘 NewAPI 指令\n"
             "/概览 [小时]  /模型 [topN]  /日志 [条数]\n"
-            "/额度  /异常  /分析  /建议  /健康"
+            "/额度  /异常  /分析  /建议  /健康\n"
+            "\n"
+            "💡 LLM 服务商：\n"
+            "- 默认使用当前会话服务商（llm_use_current_provider=true）\n"
+            "- 关闭后可在 llm_provider_id 下拉指定"
         )
         async for r in self._send_text(event, text, False):
             yield r
@@ -436,17 +446,21 @@ class NewAPIPlugin(Star):
     @filter.command("健康", alias={"health"})
     async def cmd_health(self, event: AstrMessageEvent):
         out = ["🩺 健康检查"]
+        out.append(f"plugin_version: 2.1.1")
         out.append(f"base_domain: {'OK' if self.base_domain else '缺失'}")
         out.append(f"authorization: {'OK' if self.authorization else '缺失'}")
         out.append(f"new_api_user: {'OK' if self.new_api_user else '缺失'}")
 
         if self.base_domain:
             p1 = await self._fetch_user_self()
-            out.append(f"/api/user/self: {'OK' if isinstance(p1, dict) and not p1.get('error') else 'FAIL'}")
+            ok1 = isinstance(p1, dict) and not p1.get('error') and p1.get('success', True)
+            out.append(f"/api/user/self: {'OK' if ok1 else 'FAIL'}")
             p2 = await self._fetch_logs_payload(1, 1)
-            out.append(f"/api/log/: {'OK' if isinstance(p2, dict) and not p2.get('error') else 'FAIL'}")
+            ok2 = isinstance(p2, dict) and not p2.get('error') and p2.get('success', True)
+            out.append(f"/api/log/: {'OK' if ok2 else 'FAIL'}")
             p3 = await self._fetch_usage_payload(1)
-            out.append(f"/api/data/self: {'OK' if isinstance(p3, dict) and not p3.get('error') else 'FAIL'}")
+            ok3 = isinstance(p3, dict) and not p3.get('error') and p3.get('success', True)
+            out.append(f"/api/data/self: {'OK' if ok3 else 'FAIL'}")
 
         if self.llm_enabled:
             if self.llm_use_current_provider:
