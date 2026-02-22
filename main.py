@@ -16,7 +16,7 @@ from astrbot.api.star import Context, Star, register
     "newapi",
     "木有知",
     "NewAPI 运维助手：概览/模型/日志/额度/异常/分析/建议/健康（中文简指令）",
-    "2.3.0",
+    "2.3.1",
 )
 class NewAPIPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -321,6 +321,8 @@ class NewAPIPlugin(Star):
         stats_2: Dict[str, Any],
         models_2: List[Tuple[str, Dict[str, int]]],
         channels_2: List[Tuple[str, Dict[str, int]]],
+        log_chan_24: List[Tuple[str, int]],
+        log_chan_2: List[Tuple[str, int]],
     ) -> str:
         def _line(name: str, s: Dict[str, int], total_token: int) -> str:
             pct = (int(s.get("token", 0)) / max(1, total_token)) * 100
@@ -345,19 +347,32 @@ class NewAPIPlugin(Star):
         else:
             out.append("- 暂无数据")
 
+        usage_chan_24_valid = any(c != "未知渠道" for c, _ in channels_24)
+        usage_chan_2_valid = any(c != "未知渠道" for c, _ in channels_2)
+
         out.append("\n🛣️ 24h 渠道集中度")
-        if channels_24:
+        if usage_chan_24_valid:
             for c, s in channels_24[:5]:
                 out.append("- " + _line(c, s, int(stats_24['tokens'])))
+        elif log_chan_24:
+            total_req_24 = max(1, sum(n for _, n in log_chan_24))
+            out.append("- usage 接口缺少渠道字段，以下基于日志请求数")
+            for c, n in log_chan_24[:5]:
+                out.append(f"- {c} | req {n:,} ({n/total_req_24:.1%})")
         else:
-            out.append("- usage 接口未返回渠道字段")
+            out.append("- 暂无渠道数据")
 
         out.append("\n🛣️ 2h 渠道集中度")
-        if channels_2:
+        if usage_chan_2_valid:
             for c, s in channels_2[:5]:
                 out.append("- " + _line(c, s, int(stats_2['tokens'])))
+        elif log_chan_2:
+            total_req_2 = max(1, sum(n for _, n in log_chan_2))
+            out.append("- usage 接口缺少渠道字段，以下基于日志请求数")
+            for c, n in log_chan_2[:5]:
+                out.append(f"- {c} | req {n:,} ({n/total_req_2:.1%})")
         else:
-            out.append("- usage 接口未返回渠道字段")
+            out.append("- 暂无渠道数据")
 
         if stats_24['tokens'] > 0:
             ratio = (stats_2['tokens'] / stats_24['tokens']) * 100
@@ -781,6 +796,7 @@ class NewAPIPlugin(Star):
         preface = self._format_dual_window_report(
             stats_24, models_24, channels_24,
             stats_2, models_2, channels_2,
+            m24["channel_top"], m2["channel_top"],
         )
         llm_text = await self._llm_analyze(event, "24h/2h 消耗与日志分析", json.dumps(brief, ensure_ascii=False))
         text = preface + "\n\n" + llm_text
@@ -799,7 +815,7 @@ class NewAPIPlugin(Star):
     @filter.command("健康", alias={"health"})
     async def cmd_health(self, event: AstrMessageEvent):
         out = ["🩺 健康检查"]
-        out.append(f"plugin_version: 2.3.0")
+        out.append(f"plugin_version: 2.3.1")
         out.append(f"base_domain: {'OK' if self.base_domain else '缺失'}")
         out.append(f"authorization: {'OK' if self.authorization else '缺失'}")
         out.append(f"new_api_user: {'OK' if self.new_api_user else '缺失'}")
