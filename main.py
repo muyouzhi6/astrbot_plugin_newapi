@@ -16,7 +16,7 @@ from astrbot.api.star import Context, Star, register
     "newapi",
     "木有知",
     "NewAPI 运维助手：概览/模型/日志/额度/异常/分析/建议/健康（中文简指令）",
-    "2.1.1",
+    "2.2.0",
 )
 class NewAPIPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -250,42 +250,136 @@ class NewAPIPlugin(Star):
         return []
 
     def _format_logs(self, items: List[Dict[str, Any]]) -> str:
-        out = [f"📜 最近日志（{len(items)}条）"]
+        if not items:
+            return "📜 调用日志\n暂无数据（可能是时间窗口内无请求或接口未返回明细）"
+
+        total = len(items)
+        err_items = [it for it in items if int(it.get("code", 0) or 0) >= 400 or int(it.get("type", 0) or 0) == 5]
+        slow5_items = [it for it in items if int(it.get("use_time", 0) or 0) >= 5000]
+        slow15_items = [it for it in items if int(it.get("use_time", 0) or 0) >= 15000]
+        avg_use = int(sum(int(it.get("use_time", 0) or 0) for it in items) / max(1, total))
+
+        model_cnt: Dict[str, int] = {}
         for it in items:
+            m = str(it.get("model_name") or "未知模型")
+            model_cnt[m] = model_cnt.get(m, 0) + 1
+        top_models = sorted(model_cnt.items(), key=lambda kv: kv[1], reverse=True)[:3]
+
+        out = ["📜 调用日志总览"]
+        out.append(
+            f"总请求 {total} | 错误 {len(err_items)} ({len(err_items)/max(1,total):.1%}) | "
+            f"慢请求>=5s {len(slow5_items)} | 超慢>=15s {len(slow15_items)} | 平均耗时 {avg_use}ms"
+        )
+        if top_models:
+            out.append("主力模型: " + "，".join([f"{m}({c})" for m, c in top_models]))
+
+        out.append("\n🧾 最近明细（新→旧）")
+        for it in items[:20]:
             t = int(it.get("created_at", 0) or 0)
             m = str(it.get("model_name") or "未知模型")
             typ = int(it.get("type", 0) or 0)
-            status = int(it.get("code", 0) or 0)
+            code = int(it.get("code", 0) or 0)
             pt = int(it.get("prompt_tokens", 0) or 0)
             ct = int(it.get("completion_tokens", 0) or 0)
             use = int(it.get("use_time", 0) or 0)
+
+            if typ == 5 or code >= 500:
+                icon = "🔴"
+            elif code >= 400:
+                icon = "🟠"
+            else:
+                icon = "🟢"
+
+            if use >= 15000:
+                lat = "🐢"
+            elif use >= 5000:
+                lat = "⚠️"
+            else:
+                lat = "⚡"
+
             out.append(
-                f"- {self._fmt_ts(t)} | {m} | type={typ} code={status} | in={pt} out={ct} | {use}ms"
+                f"{icon} {self._fmt_ts(t)} | {m} | code={code} | {lat}{use}ms | token {pt}/{ct}"
             )
+
+        if total > 20:
+            out.append(f"… 其余 {total-20} 条已省略，可用 /日志 {min(100, total)} 查看更多")
+
         return "\n".join(out)
 
     def _detect_abnormal(self, items: List[Dict[str, Any]]) -> str:
-        errs = []
-        slow = []
+        if not items:
+            return "🚨 异常分析\n暂无日志数据，无法判断。"
+
+        errs: List[Dict[str, Any]] = []
+        slow: List[Dict[str, Any]] = []
+        model_err: Dict[str, int] = {}
+
         for it in items:
             code = int(it.get("code", 0) or 0)
             typ = int(it.get("type", 0) or 0)
             use = int(it.get("use_time", 0) or 0)
+            m = str(it.get("model_name") or "未知模型")
             if typ == 5 or code >= 400:
                 errs.append(it)
+                model_err[m] = model_err.get(m, 0) + 1
             if use >= 15000:
                 slow.append(it)
 
+        total = len(items)
+        err_rate = len(errs) / max(1, total)
+        slow_rate = len(slow) / max(1, total)
+
         lines = ["🚨 异常分析"]
-        lines.append(f"错误条数: {len(errs)}")
-        lines.append(f"慢请求(>=15s): {len(slow)}")
+        lines.append(
+            f"总请求 {total} | 错误 {len(errs)} ({err_rate:.1%}) | 超慢>=15s {len(slow)} ({slow_rate:.1%})"
+        )
+
+        if err_rate >= 0.2:
+            lvl = "P0"
+            reason = "错误率过高，已显著影响可用性"
+        elif err_rate >= 0.08 or len(slow) >= 5:
+            lvl = "P1"
+            reason = "稳定性退化，建议尽快处理"
+        elif err_rate > 0 or len(slow) > 0:
+            lvl = "P2"
+            reason = "存在零星异常，建议观察并优化"
+        else:
+            lvl = "OK"
+            reason = "未发现明显异常"
+        lines.append(f"风险等级: {lvl}（{reason}）")
+
+        if model_err:
+            top_err = sorted(model_err.items(), key=lambda kv: kv[1], reverse=True)[:3]
+            lines.append("高风险模型: " + "，".join([f"{m}({c})" for m, c in top_err]))
+
         if errs:
-            lines.append("\n最近错误:")
+            lines.append("\n🧯 最近错误样本")
             for it in errs[:5]:
                 t = int(it.get("created_at", 0) or 0)
                 m = str(it.get("model_name") or "未知模型")
                 code = int(it.get("code", 0) or 0)
-                lines.append(f"- {self._fmt_ts(t)} | {m} | code={code}")
+                use = int(it.get("use_time", 0) or 0)
+                lines.append(f"- {self._fmt_ts(t)} | {m} | code={code} | {use}ms")
+
+        if slow:
+            lines.append("\n🐢 超慢样本")
+            for it in slow[:3]:
+                t = int(it.get("created_at", 0) or 0)
+                m = str(it.get("model_name") or "未知模型")
+                use = int(it.get("use_time", 0) or 0)
+                lines.append(f"- {self._fmt_ts(t)} | {m} | {use}ms")
+
+        lines.append("\n✅ 建议动作")
+        if lvl in ("P0", "P1"):
+            lines.append("1) 先限制异常模型并切换备用模型验证")
+            lines.append("2) 缩短 max_tokens/降低并发，观察 15 分钟")
+            lines.append("3) 按 code 分组排查上游网关与 provider 状态")
+        elif lvl == "P2":
+            lines.append("1) 针对慢请求模型做参数收敛（max_tokens/temperature）")
+            lines.append("2) 保持监控，若错误率升至 8% 以上按 P1 处理")
+        else:
+            lines.append("1) 当前健康，可继续观察峰值时段")
+
         return "\n".join(lines)
 
     async def _llm_analyze(self, event: AstrMessageEvent, title: str, content: str) -> str:
@@ -306,9 +400,24 @@ class NewAPIPlugin(Star):
             return "LLM 服务商未设置（请检查 llm_use_current_provider 或 llm_provider_id）"
 
         prompt = (
-            f"你是 NewAPI 运维分析助手。请基于以下数据输出中文简报，结构固定为：\n"
-            f"1) 主要问题（最多3条）\n2) 根因判断\n3) 立即动作（P0/P1）\n4) 优化建议\n\n"
-            f"[{title}]\n{content}"
+            "你是资深 NewAPI SRE 值班工程师。请基于输入数据输出【可执行】中文运维结论，禁止空话。\n\n"
+            "输出必须严格按以下结构：\n"
+            "# 结论摘要\n"
+            "- 一句话判断当前系统状态（健康/亚健康/故障）\n"
+            "- 影响范围（用户面/模型面/时段）\n\n"
+            "# 关键发现（按严重度排序，最多5条）\n"
+            "每条格式：\n"
+            "- [P0|P1|P2] 现象｜证据（具体数值）｜可能根因\n\n"
+            "# 立即动作（15分钟内）\n"
+            "列 3-5 条可直接执行动作，每条都要有目标与预期\n\n"
+            "# 今日优化（当天完成）\n"
+            "列 3-5 条优化项，优先稳定性与成本\n\n"
+            "# 观察指标与阈值\n"
+            "至少给出：错误率、P95耗时、超慢占比、请求量波动阈值，并写明告警阈值\n\n"
+            "# 需要补充的数据\n"
+            "若数据不足，明确缺什么，不得臆测。\n\n"
+            f"【分析主题】{title}\n"
+            f"【输入数据】\n{content}\n"
         )
         try:
             llm_resp = await self.context.llm_generate(
@@ -413,7 +522,7 @@ class NewAPIPlugin(Star):
         payload = await self._fetch_logs_payload(max(self.default_log_limit, 30), 24)
         items = self._extract_log_items(payload)
         text = self._detect_abnormal(items)
-        async for r in self._send_text(event, text, False):
+        async for r in self._send_text(event, text, self.log_use_forward):
             yield r
 
     @filter.command("分析")
@@ -425,13 +534,55 @@ class NewAPIPlugin(Star):
         s, e = self._window(self.default_window_hours)
         stats, models = self._aggregate(usage_records, s, e)
 
+        err_cnt = 0
+        slow_cnt = 0
+        for it in log_items:
+            code = int(it.get("code", 0) or 0)
+            typ = int(it.get("type", 0) or 0)
+            use = int(it.get("use_time", 0) or 0)
+            if typ == 5 or code >= 400:
+                err_cnt += 1
+            if use >= 15000:
+                slow_cnt += 1
+
         brief = {
-            "stats": stats,
-            "top_models": models[:5],
-            "abnormal_preview": self._detect_abnormal(log_items),
+            "window_hours": self.default_window_hours,
+            "summary": {
+                "tokens": stats.get("tokens", 0),
+                "requests": stats.get("requests", 0),
+                "quota": stats.get("quota", 0),
+                "rpm": round(float(stats.get("rpm", 0)), 4),
+                "tpm": round(float(stats.get("tpm", 0)), 4),
+            },
+            "top_models": [
+                {
+                    "model": m,
+                    "requests": s.get("count", 0),
+                    "tokens": s.get("token", 0),
+                    "quota": s.get("quota", 0),
+                }
+                for m, s in models[:8]
+            ],
+            "log_snapshot": {
+                "total": len(log_items),
+                "error_count": err_cnt,
+                "error_rate": round(err_cnt / max(1, len(log_items)), 4),
+                "slow15s_count": slow_cnt,
+                "slow15s_rate": round(slow_cnt / max(1, len(log_items)), 4),
+            },
+            "recent_errors": [
+                {
+                    "time": self._fmt_ts(int(it.get("created_at", 0) or 0)),
+                    "model": str(it.get("model_name") or "未知模型"),
+                    "code": int(it.get("code", 0) or 0),
+                    "use_time_ms": int(it.get("use_time", 0) or 0),
+                }
+                for it in log_items
+                if int(it.get("type", 0) or 0) == 5 or int(it.get("code", 0) or 0) >= 400
+            ][:8],
         }
         text = await self._llm_analyze(event, "调用分析", json.dumps(brief, ensure_ascii=False))
-        async for r in self._send_text(event, text, False):
+        async for r in self._send_text(event, text, self.use_forward):
             yield r
 
     @filter.command("建议")
@@ -440,13 +591,13 @@ class NewAPIPlugin(Star):
         log_items = self._extract_log_items(logs)
         raw = self._detect_abnormal(log_items)
         text = await self._llm_analyze(event, "优化建议", raw)
-        async for r in self._send_text(event, text, False):
+        async for r in self._send_text(event, text, self.use_forward):
             yield r
 
     @filter.command("健康", alias={"health"})
     async def cmd_health(self, event: AstrMessageEvent):
         out = ["🩺 健康检查"]
-        out.append(f"plugin_version: 2.1.1")
+        out.append(f"plugin_version: 2.2.0")
         out.append(f"base_domain: {'OK' if self.base_domain else '缺失'}")
         out.append(f"authorization: {'OK' if self.authorization else '缺失'}")
         out.append(f"new_api_user: {'OK' if self.new_api_user else '缺失'}")

@@ -1,6 +1,6 @@
 name: newapi
 desc: NewAPI 运维助手（中文简指令 + LLM 分析）
-version: 2.1.1
+version: 2.2.0
 author: 木有知
 repo: https://github.com/muyouzhi6/astrbot_plugin_newapi
 astrbot_version: ">=4.16,<5"
