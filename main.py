@@ -16,7 +16,7 @@ from astrbot.api.star import Context, Star, register
     "newapi",
     "木有知",
     "NewAPI 运维助手：概览/模型/日志/额度/异常/分析/建议/健康（中文简指令）",
-    "2.3.1",
+    "2.4.0",
 )
 class NewAPIPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -154,13 +154,13 @@ class NewAPIPlugin(Star):
                 pass
         return payload
 
-    async def _fetch_logs_payload(self, limit: int, hours: int = 24) -> Any:
+    async def _fetch_logs_payload(self, limit: int, hours: int = 24, page: int = 1) -> Any:
         if not self.base_domain:
             return {"error": "missing base_domain"}
         start_ts, end_ts = self._window(hours)
         q = urlencode(
             {
-                "p": 1,
+                "p": max(1, int(page)),
                 "page_size": max(1, min(limit, 100)),
                 "type": 0,
                 "start_timestamp": str(start_ts),
@@ -169,6 +169,35 @@ class NewAPIPlugin(Star):
         )
         url = f"{self.base_domain}/api/log/?{q}"
         return await self._http_get_json(url, self._headers())
+
+    async def _fetch_logs_all(self, hours: int = 24, page_size: int = 100, max_pages: int = 30) -> List[Dict[str, Any]]:
+        all_items: List[Dict[str, Any]] = []
+        page_size = max(1, min(page_size, 100))
+        max_pages = max(1, min(max_pages, 100))
+
+        for p in range(1, max_pages + 1):
+            payload = await self._fetch_logs_payload(page_size, hours, page=p)
+            items = self._extract_log_items(payload)
+            if not items:
+                break
+
+            all_items.extend(items)
+
+            total = 0
+            if isinstance(payload, dict):
+                d = payload.get("data")
+                if isinstance(d, dict):
+                    try:
+                        total = int(d.get("total", 0) or 0)
+                    except Exception:
+                        total = 0
+
+            if total > 0 and len(all_items) >= total:
+                break
+            if len(items) < page_size:
+                break
+
+        return all_items
 
     async def _fetch_user_self(self) -> Any:
         if not self.base_domain:
@@ -347,30 +376,21 @@ class NewAPIPlugin(Star):
         else:
             out.append("- 暂无数据")
 
-        usage_chan_24_valid = any(c != "未知渠道" for c, _ in channels_24)
-        usage_chan_2_valid = any(c != "未知渠道" for c, _ in channels_2)
-
-        out.append("\n🛣️ 24h 渠道集中度")
-        if usage_chan_24_valid:
+        out.append("\n🛣️ 24h 渠道集中度（按日志请求数）")
+        if channels_24:
+            total_req_24 = max(1, int(stats_24.get("requests", 0) or 0))
             for c, s in channels_24[:5]:
-                out.append("- " + _line(c, s, int(stats_24['tokens'])))
-        elif log_chan_24:
-            total_req_24 = max(1, sum(n for _, n in log_chan_24))
-            out.append("- usage 接口缺少渠道字段，以下基于日志请求数")
-            for c, n in log_chan_24[:5]:
-                out.append(f"- {c} | req {n:,} ({n/total_req_24:.1%})")
+                cnt = int(s.get("count", 0) or 0)
+                out.append(f"- {c} | req {cnt:,} ({cnt/total_req_24:.1%})")
         else:
             out.append("- 暂无渠道数据")
 
-        out.append("\n🛣️ 2h 渠道集中度")
-        if usage_chan_2_valid:
+        out.append("\n🛣️ 2h 渠道集中度（按日志请求数）")
+        if channels_2:
+            total_req_2 = max(1, int(stats_2.get("requests", 0) or 0))
             for c, s in channels_2[:5]:
-                out.append("- " + _line(c, s, int(stats_2['tokens'])))
-        elif log_chan_2:
-            total_req_2 = max(1, sum(n for _, n in log_chan_2))
-            out.append("- usage 接口缺少渠道字段，以下基于日志请求数")
-            for c, n in log_chan_2[:5]:
-                out.append(f"- {c} | req {n:,} ({n/total_req_2:.1%})")
+                cnt = int(s.get("count", 0) or 0)
+                out.append(f"- {c} | req {cnt:,} ({cnt/total_req_2:.1%})")
         else:
             out.append("- 暂无渠道数据")
 
@@ -683,14 +703,20 @@ class NewAPIPlugin(Star):
             "未知渠道",
         )
 
-        # logs: 24h 与 2h 双窗口（用于错误/耗时分析）
-        logs_24 = await self._fetch_logs_payload(max(self.default_log_limit, 100), 24)
-        logs_2 = await self._fetch_logs_payload(max(self.default_log_limit, 100), 2)
-        log_items_24 = self._extract_log_items(logs_24)
-        log_items_2 = self._extract_log_items(logs_2)
+        # logs: 24h 与 2h 全量分页（用于渠道/错误/耗时分析）
+        log_items_24 = await self._fetch_logs_all(hours=24, page_size=100, max_pages=40)
+        log_items_2 = await self._fetch_logs_all(hours=2, page_size=100, max_pages=20)
 
         m24 = self._summarize_log_metrics(log_items_24)
         m2 = self._summarize_log_metrics(log_items_2)
+
+        # 渠道统计一律以日志为准（usage 常无渠道字段）
+        channels_24 = [
+            (name, {"token": 0, "count": cnt, "quota": 0}) for name, cnt in m24["channel_top"]
+        ]
+        channels_2 = [
+            (name, {"token": 0, "count": cnt, "quota": 0}) for name, cnt in m2["channel_top"]
+        ]
 
         brief = {
             "dual_window_usage": {
@@ -815,7 +841,7 @@ class NewAPIPlugin(Star):
     @filter.command("健康", alias={"health"})
     async def cmd_health(self, event: AstrMessageEvent):
         out = ["🩺 健康检查"]
-        out.append(f"plugin_version: 2.3.1")
+        out.append(f"plugin_version: 2.4.0")
         out.append(f"base_domain: {'OK' if self.base_domain else '缺失'}")
         out.append(f"authorization: {'OK' if self.authorization else '缺失'}")
         out.append(f"new_api_user: {'OK' if self.new_api_user else '缺失'}")
